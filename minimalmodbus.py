@@ -76,6 +76,10 @@ TIMEOUT  = 0.05
 CLOSE_PORT_AFTER_EACH_CALL = False
 """Default value for port closure setting."""
 
+# This change borrowed from https://github.com/pyhys/minimalmodbus/pull/13
+FLOAT_ENDIANNESS = '>'
+"""Default Order for Endianess in _floatToBytestring and _bytestringToFloat methods"""
+
 #####################
 ## Named constants ##
 #####################
@@ -370,7 +374,7 @@ class Instrument(object):
 
         Args:
             * registeraddress (int): The slave register start address (use decimal numbers, not hex).
-            * functioncode (int): Modbus function code. Can be 3 or 4.
+            * functioncode (int): Modbus function code. Can be 3, 4 or 23.
             * numberOfRegisters (int): The number of registers allocated for the float. Can be 2 or 4.
 
         ====================================== ================= =========== =================
@@ -387,7 +391,7 @@ class Instrument(object):
             ValueError, TypeError, IOError
 
         """
-        _checkFunctioncode(functioncode, [3, 4])
+        _checkFunctioncode(functioncode, [3, 4, 23])
         _checkInt(numberOfRegisters, minvalue=2, maxvalue=4, description='number of registers')
         return self._genericCommand(functioncode, registeraddress, numberOfRegisters=numberOfRegisters, payloadformat='float')
 
@@ -425,10 +429,17 @@ class Instrument(object):
         Each 16-bit register in the slave are interpreted as two characters (1 byte = 8 bits).
         For example 16 consecutive registers can hold 32 characters (32 bytes).
 
+        For Python 3 the raw bytes are turned into a unicode object using the
+        latin1 encoding. If what is of interest are the raw bytes are required,
+        then returned string can simply be encoded using this encoding. If the
+        instrument returns text in a different encoding, then the encoding can
+        be fixed by first encoding the result using latin1 and then decoding
+        with the correct encoding e.g. utf-8.
+
         Args:
             * registeraddress (int): The slave register start address (use decimal numbers, not hex).
             * numberOfRegisters (int): The number of registers allocated for the string.
-            * functioncode (int): Modbus function code. Can be 3 or 4.
+            * functioncode (int): Modbus function code. Can be 3, 4 or 23.
 
         Returns:
             The string (str).
@@ -437,7 +448,7 @@ class Instrument(object):
             ValueError, TypeError, IOError
 
         """
-        _checkFunctioncode(functioncode, [3, 4])
+        _checkFunctioncode(functioncode, [3, 4, 23])
         _checkInt(numberOfRegisters, minvalue=1, description='number of registers for read string')
         return self._genericCommand(functioncode, registeraddress, \
             numberOfRegisters=numberOfRegisters, payloadformat='string')
@@ -562,7 +573,7 @@ class Instrument(object):
         NUMBER_OF_BITS = 1
         NUMBER_OF_BYTES_FOR_ONE_BIT = 1
         NUMBER_OF_BYTES_BEFORE_REGISTERDATA = 1
-        ALL_ALLOWED_FUNCTIONCODES = list(range(1, 7)) + [15, 16]  # To comply with both Python2 and Python3
+        ALL_ALLOWED_FUNCTIONCODES = list(range(1, 7)) + [15, 16, 23]  # To comply with both Python2 and Python3
         MAX_NUMBER_OF_REGISTERS = 255
 
         # Payload format constants, so datatypes can be told apart.
@@ -598,6 +609,10 @@ class Instrument(object):
             if payloadformat not in ALL_PAYLOADFORMATS:
                 raise ValueError('The payload format is unknown. Given format: {0!r}, functioncode: {1!r}.'.\
                     format(payloadformat, functioncode))
+        elif functioncode == 23:
+            if payloadformat not in [PAYLOADFORMAT_STRING, PAYLOADFORMAT_FLOAT]:
+                raise ValueError('The payload format given is not allowed for this function code. ' + \
+                                 'Given format: {0!r}, functioncode: {1!r}.'.format(payloadformat, functioncode))
         else:
             if payloadformat is not None:
                 raise ValueError('The payload format given is not allowed for this function code. ' + \
@@ -614,7 +629,7 @@ class Instrument(object):
                 'Given format: {0!r}.'.format(payloadformat))
 
                     # Number of registers
-        if functioncode not in [3, 4, 16] and numberOfRegisters != 1:
+        if functioncode not in [3, 4, 16, 23] and numberOfRegisters != 1:
             raise ValueError('The numberOfRegisters is not valid for this function code. ' + \
                 'NumberOfRegisters: {0!r}, functioncode {1}.'.format(numberOfRegisters, functioncode))
 
@@ -692,12 +707,20 @@ class Instrument(object):
                             _numToTwoByteString(numberOfRegisters) + \
                             _numToOneByteString(numberOfRegisterBytes) + \
                             registerdata
+        elif functioncode == 23:
+            # Read register and amount
+            payloadToSlave = \
+                    _numToTwoByteString(registeraddress) + \
+                    _numToTwoByteString(numberOfRegisters) + \
+                    _numToTwoByteString(registeraddress) + \
+                    _numToTwoByteString(0) + \
+                    _numToOneByteString(0)
 
         ## Communicate ##
         payloadFromSlave = self._performCommand(functioncode, payloadToSlave)
 
         ## Check the contents in the response payload ##
-        if functioncode in [1, 2, 3, 4]:
+        if functioncode in [1, 2, 3, 4, 23]:
             _checkResponseByteCount(payloadFromSlave)  # response byte count
 
         if functioncode in [5, 6, 15, 16]:
@@ -725,7 +748,7 @@ class Instrument(object):
 
             return _bitResponseToValue(registerdata)
 
-        if functioncode in [3, 4]:
+        if functioncode in [3, 4, 23]:
             registerdata = payloadFromSlave[NUMBER_OF_BYTES_BEFORE_REGISTERDATA:]
             if len(registerdata) != numberOfRegisterBytes:
                 raise ValueError('The registerdata length does not match number of register bytes. ' + \
@@ -1144,7 +1167,7 @@ def _predictResponseSize(mode, functioncode, payloadToSlave):
     if functioncode in [5, 6, 15, 16]:
         response_payload_size = NUMBER_OF_PAYLOAD_BYTES_IN_WRITE_CONFIRMATION
 
-    elif functioncode in [1, 2, 3, 4]:
+    elif functioncode in [1, 2, 3, 4, 23]:
         given_size = _twoByteStringToNum(payloadToSlave[BYTERANGE_FOR_GIVEN_SIZE])
         if functioncode == 1 or functioncode == 2:
             # Algorithm from MODBUS APPLICATION PROTOCOL SPECIFICATION V1.1b
@@ -1152,7 +1175,7 @@ def _predictResponseSize(mode, functioncode, payloadToSlave):
             response_payload_size = NUMBER_OF_PAYLOAD_BYTES_FOR_BYTECOUNTFIELD + \
                                     number_of_inputs // 8 + (1 if number_of_inputs % 8 else 0)
 
-        elif functioncode == 3 or functioncode == 4:
+        elif functioncode in [3, 4, 23]:
             number_of_registers = given_size
             response_payload_size = NUMBER_OF_PAYLOAD_BYTES_FOR_BYTECOUNTFIELD + \
                                     number_of_registers * _NUMBER_OF_BYTES_PER_REGISTER
@@ -1415,7 +1438,7 @@ def _floatToBytestring(value, numberOfRegisters=2):
     _checkNumerical(value, description='inputvalue')
     _checkInt(numberOfRegisters, minvalue=2, maxvalue=4, description='number of registers')
 
-    formatcode = '>'  # Big-endian
+    formatcode = FLOAT_ENDIANNESS  # Defaults to Big-endian
     if numberOfRegisters == 2:
         formatcode += 'f'  # Float (4 bytes)
         lengthtarget = 4
@@ -1454,7 +1477,7 @@ def _bytestringToFloat(bytestring, numberOfRegisters=2):
 
     numberOfBytes = _NUMBER_OF_BYTES_PER_REGISTER * numberOfRegisters
 
-    formatcode = '>'  # Big-endian
+    formatcode = FLOAT_ENDIANNESS  # Big-endian by default
     if numberOfRegisters == 2:
         formatcode += 'f'  # Float (4 bytes)
     elif numberOfRegisters == 4:
