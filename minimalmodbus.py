@@ -88,7 +88,7 @@ MODE_ASCII = 'ascii'
 ##############################
 
 
-class Instrument():
+class Instrument(object):
     """Instrument class for talking to instruments (slaves) via the Modbus RTU or ASCII protocols (via RS485 or RS232).
 
     Args:
